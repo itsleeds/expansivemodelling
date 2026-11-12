@@ -9,3 +9,4 @@ __pycache__/
 .RData
 *.gpkg-wal
 *.gpkg-shm
+data/processed/_work/

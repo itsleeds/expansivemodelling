@@ -6,3 +6,5 @@ numpy
 matplotlib
 osmnx
 scikit-learn
+scipy
+shapely
