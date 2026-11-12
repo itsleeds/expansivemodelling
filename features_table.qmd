@@ -1,11 +1,97 @@
 ---
-title: "Feature comparison: open vs closed tools for motor traffic modelling"
+title: "Open vs closed tools for motor traffic modelling"
 format:
   html:
     code-fold: true
 ---
 
-This page compares open tools (AequilibraE and friends) with closed tools
-(SATURN and similar proprietary packages) for motor traffic modelling.
+Synthesis of two independently-produced research notes, commissioned in
+parallel for this project:
 
-*To be completed from the parallel tool-landscape research.* 
+- `notes/tool-landscape-agy.md` (agentic research with local repo access to
+  the AT Futures toolchain)
+- `notes/tool-landscape-hermes.md` (independent web-based research)
+
+They agree on the core picture. One disagreement resolved itself: the
+web-based note flagged `netassign`/`netweld` as unverifiable public projects
+(they are private/local repositories), while the repo-aware note documented
+them from their READMEs; both feeds are used below.
+
+## Feature comparison
+
+| # | Feature | SATURN (AtkinsRéalis) | Other closed (Visum, EMME, CUBE, TransCAD, OmniTRANS, Aimsun) | AequilibraE | Other open (MATSim, SUMO, netassign/netweld/osmactive, cityseer/sDNA) |
+|---|---|---|---|---|---|
+| 1a | All-or-nothing + static UE (BPR) | Yes — `SATASS`/`SATALL` Wardrop UE, multi-class PCU | Yes — LUCE (Visum), Origin-based (EMME), BFW (TransCAD/CUBE) | Yes — AoN/MSA/FW/CFW/BFW with BPR VDFs, PCE multi-class | Yes — `netassign` BPR congestion loops; OSRM/Valhalla AoN bases |
+| 1b | Stochastic assignment (SUE) | Yes — Burrell + Dial in `SATASS` | Yes — Logit/Probit/C-Logit variants | No — deterministic shortest-path/UE only | Partial — near-shortest dispersion in `netassign`/cityseer; `marouter` in SUMO |
+| 1c | Dynamic assignment (DTA) | Partial — quasi-dynamic `PassQ` queue pass-through | Yes — native DTA (Visum SBA, EMME Dynameq, Aimsun DUE) | No — static periods only | Yes — MATSim queue-based DTA; SUMO `duaIterate`; UXsim meso |
+| 2 | Matrix estimation (ODME) from counts | Yes — `SATME2`/`SATPIJA` entropy + screenline constraints | Yes — TFlowFuzzy (Visum), CUBE Analyst, EMME demand adjustment | Partial — IPF/Furness + gravity synthesis; no count-constrained entropy ODME | Partial — SUMO `routeSampler`, MATSim Cadyts; `netfit` count-based leg calibration |
+| 3 | OSM network build + cleaning (junctions, dual carriageways) | No — no native OSM reader; manual `SATNET` coding | Partial — OSM import exists but heavy manual editing of complex junctions | Partial — Overpass download into SpatiaLite; no automated junction consolidation | Yes — `osmget`/`osmactive`/`netclean`/`netweld`: dual-carriageway merge, junction consolidation, stub despining, OS Open Roads conflation (used in this repo, `N3`/`N4`) |
+| 4 | Zoning + demand model (trip generation/distribution) | Partial — MX + skims; demand via external DIADEM (TAG VDM) | Yes — full 4-step/tour-based/ABM suites built in | Yes — zones, connectors, skims, IPF, synthetic gravity; `Tradesman` zone builder | Partial/Yes — `netassign` routes zone-free point-to-point gravity demand; ActivitySim/Quetzal for zonal/ABM |
+| 5 | Scripting, CLI, headless CI | Partial — batch scripts, but dongles + binary formats block public CI | Partial — strong Python APIs (EMME, Visum COM), licence servers block CI | Yes — pure Python, SQLite/OMX, runs headless in GitHub Actions (see this repo's `site.yml`) | Yes — native Linux CLIs (Rust), GeoParquet, `targets`/Quarto orchestration in CI |
+| 6 | Licensing and cost | No — commercial per-seat/dongle, node/zone capacity bands | No — £5k–£30k+/seat/yr subscriptions typical | Yes — BSD-3-Clause, zero cost, unlimited scaling | Yes — MIT/BSD/EPL/GPL per project |
+| 7 | Validation workflows (screenlines, GEH, TAG M3.1) | Yes — `SATLOOK` count/screenline/GEH reporting built in | Yes — built-in screenline objects, GEH/R²/RMSE diagnostics | Partial — `rgap` logs only; GEH/screenlines must be scripted (done in this repo's paper) | Partial/Yes — scripted and benchmark-enforced: `countsget` normalisation, `aadtbench` blind spatial folds, `netfit` LODO CV |
+| 8 | Multi-resolution macro/meso/micro coupling | Yes — `SATSIM` mesoscopic junction area coupled to macro buffer network | Yes — Aimsun Next single-environment macro/meso/micro; Vissim/Dynameq/TransModeler coupling | No — static link-based macro only | Partial — SUMO hybrid meso/micro; MATSim+micro; no open static-UE↔micro handoff |
+| 9a | Cyclic flow profiles, blocking back, flow metering at junctions | Yes — SATURN's signature `SATSIM` capability, unique in the market | Partial — junction delay models (Visum ICA, OmniTRANS MaDAM); no peloton/cyclic-flow simulation-assignment loop | No — link-based BPR congestion only; no turn bans in path-building | Partial — `netassign` edge-based turn penalties/restrictions/signals; SUMO micro spillback; no open equivalent of the cyclic-profile loop |
+| 9b | Zone-free point routing, exact conflation, blind multi-city benchmarking | No — TAZ centroid connectors, manual network coding, closed calibration | No — TAZ-bound, proprietary formats | Partial — node-to-node routing possible; TAZ-centric by design | Yes — `netassign` building/POI-level routing, `netweld` exact shared-length conflation, `aadtbench` 9-city + 73-LTA blind benchmarking |
+
+## Closed tool profiles (condensed)
+
+- **SATURN** (AtkinsRéalis; developed at ITS Leeds, Hall/Van Vliet/Willumsen
+  1980): combined junction simulation (`SATSIM`) + assignment (`SATASS`);
+  the de facto UK standard for DfT TAG appraisal. Excels in congested urban
+  networks where junction interactions dominate. Licence: proprietary,
+  capacity-banded annual seats, reduced academic rates.
+- **PTV Visum** (Umovity): strongest all-round multimodal strategic suite;
+  LUCE path-based UE, TFlowFuzzy ODME, SBA dynamic assignment, Python/COM
+  automation, Vissim coupling. Subscription + maintenance.
+- **PTV Vistro**: deterministic junction/corridor operational tool (HCM,
+  Kimber roundabouts), not a regional equilibrium model; cheaper per seat.
+- **Bentley OpenPaths EMME**: mathematical rigour and convergence at metro
+  scale (Origin-based UE, 1e-6 rgap); clean Python API; Dynameq for meso DTA.
+- **Caliper TransCAD**: GIS-native platform; published pricing (~$15k
+  purchase, $6-7.2k/yr maintenance); strong screenline tooling; TransModeler
+  coupling. Strong in North American DOT/MPO practice.
+- **Bentley OpenPaths CUBE**: Voyager script-based 4-step/ABM customisation;
+  CUBE Analyst ODME; cloud cluster scenarios.
+- **OmniTRANS** (DAT.Mobility/Goudappel → Bentley OpenPaths): Dutch national/
+  regional standard; MaDAM dynamic assignment; OmniTRANS Expert unmaintained
+  from Jan 2026, supported to 2030 during migration.
+- **Aimsun Next**: single-environment macro/meso/micro with DUE; excels for
+  corridor and smart-motorway operational schemes.
+
+## What open tools are missing to replace SATURN-type workflows
+
+1. A junction-level cyclic-flow-profile simulation coupled inside the static
+   equilibrium loop (peloton dispersion, signal offsets, blocking back,
+   metering) — the one capability no open tool reproduces.
+2. Packaged count-constrained entropy ODME (SATME2/TFlowFuzzy class) with
+   screenline constraints and TAG-style distortion guardrails.
+3. Turn-level micro/meso resolution for scheme appraisal at a single
+   junction, with a documented handoff from a city-wide macro assignment.
+4. Packaged UK-standard validation reporting (TAG Unit M3.1 GEH/screenline/
+   VDM tables); achievable in scripts (as in this repo's paper) but not
+   shipped as audited tooling.
+
+## Where open tools are ahead
+
+- Zero licence cost, no dongles, no licence servers: full reproducibility on
+  CI (this repo renders its paper in GitHub Actions on every push).
+- Open algorithms auditable end to end; open formats (GeoParquet, OMX,
+  SQLite) instead of binary model files.
+- OSM-native network construction and cleaning at scale (`osmget`,
+  `osmactive`, `netclean`, `netweld` — demonstrated in the `N0`-`N4` study in
+  the paper: 90,993 → 36,232 links, r = 0.591 → 0.886 against DfT counts).
+- Zone-free point-to-point demand routing (`netassign`) avoiding
+  centroid-connector artefacts.
+- Blind multi-city benchmarking (`aadtbench`), which no closed vendor
+  publishes.
+
+## Sources
+
+Full source lists are in `notes/tool-landscape-agy.md` and
+`notes/tool-landscape-hermes.md` (committed alongside this file). Primary
+references: AtkinsRéalis SATURN pages, Van Vliet (1982), PTV VISUM/Vistro
+manuals, Bentley OpenPaths EMME/CUBE pages, Caliper TransCAD, DAT.Mobility
+OmniTRANS migration notices, AequilibraE documentation (Pojas & Lopane 2023),
+MATSim/SUMO books, AT Futures repo READMEs (`netassign`, `netweld`,
+`osmactive`, `netclean`, `netfit`, `countsget`, `osmget`).
