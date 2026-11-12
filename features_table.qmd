@@ -1,0 +1,11 @@
+---
+title: "Feature comparison: open vs closed tools for motor traffic modelling"
+format:
+  html:
+    code-fold: true
+---
+
+This page compares open tools (AequilibraE and friends) with closed tools
+(SATURN and similar proprietary packages) for motor traffic modelling.
+
+*To be completed from the parallel tool-landscape research.* 

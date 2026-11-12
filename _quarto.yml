@@ -1,0 +1,34 @@
+project:
+  type: website
+  output-dir: _site
+  render:
+    - README.md
+    - paper/index.qmd
+    - features_table.qmd
+
+execute:
+  freeze: auto
+
+website:
+  title: "expansivemodelling"
+  repo-url: https://github.com/itsleeds/expansivemodelling
+  repo-branch: main
+  repo-actions: [edit, issue]
+  navbar:
+    background: primary
+    search: true
+    left:
+      - text: "Home"
+        href: README.md
+      - text: "Paper"
+        href: paper/index.qmd
+      - text: "Features"
+        href: features_table.qmd
+    right:
+      - icon: github
+        href: https://github.com/itsleeds/expansivemodelling
+        aria-label: GitHub
+
+format:
+  html:
+    theme: cosmo

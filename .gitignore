@@ -1,0 +1,11 @@
+_site/
+.quarto/
+*.html
+!README.md
+.venv/
+__pycache__/
+*.pyc
+.Rhistory
+.RData
+*.gpkg-wal
+*.gpkg-shm
