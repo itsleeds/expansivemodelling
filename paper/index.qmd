@@ -1,6 +1,419 @@
 ---
-title: "Expansive modelling: motor traffic estimates for Leeds with open tools"
+title: "Expansive Open Traffic Modelling: Estimating Network-Wide Motor Traffic AADT in Leeds with AequilibraE and Topological Network Cleaning"
+subtitle: "Benchmarking OpenStreetMap Consolidation, Multi-Class Equilibrium Assignment, and Spatial Calibration Against DfT Counts"
+author:
+  - name: "Institute for Transport Studies (ITS), University of Leeds"
+date: today
+bibliography: references.bib
+toc: true
+number-sections: true
+format:
+  html:
+    code-fold: true
+    code-summary: "Show reproducible analysis code"
+execute:
+  echo: true
+  warning: false
+  message: false
 ---
 
-Work in progress: the model build is delegated and this paper will be
-generated from reproducible chunks (see README).
+```{python}
+#| label: setup
+#| include: false
+from pathlib import Path
+import geopandas as gpd
+import numpy as np
+import pandas as pd
+from IPython.display import Markdown
+
+PROC = Path("../data/processed")
+DATA = Path("../data")
+
+net_sum = pd.read_parquet(PROC / "network_variants_summary.parquet")
+step_log = pd.read_parquet(PROC / "netclean_step_log.parquet")
+val_met = pd.read_parquet(PROC / "validation_metrics.parquet")
+cat_brk = pd.read_parquet(PROC / "category_breakdown.parquet")
+vkm_ref = pd.read_parquet(PROC / "dft_vkm_reference.parquet")
+dft_sites = pd.read_parquet(PROC / "dft_counts_leeds.parquet")
+lad_aadt = gpd.read_parquet(PROC / "leeds_lad_aadt.parquet")
+
+def mrow(nid: str, aid: str, eset: str = "leeds_lad_2021_2025") -> pd.Series:
+    return val_met[
+        (val_met["network_id"] == nid)
+        & (val_met["assignment_id"] == aid)
+        & (val_met["eval_set"] == eset)
+    ].iloc[0]
+
+def nrow(nid: str, scope: str = "leeds_lad") -> pd.Series:
+    return net_sum[(net_sum["variant_id"] == nid) & (net_sum["scope"] == scope)].iloc[0]
+
+r_uncrit = mrow("N0_raw_unfiltered", "aon_physical")
+r_base_aon = mrow("N1_raw_motor", "aon_physical")
+r_base_ue = mrow("N1_raw_motor", "ue_bfw_physical")
+r_bench_ue = mrow("N1_raw_motor", "ue_bfw_aadtbench")
+r_n3_phys = mrow("N3_csis_netclean", "ue_improved_phys")
+r_n3_cal = mrow("N3_csis_netclean", "ue_improved_cal")
+r_n4_phys = mrow("N4_csis_strategic", "ue_improved_phys")
+r_n4_cal = mrow("N4_csis_strategic", "ue_improved_cal")
+r_n4_ext = mrow("N4_csis_strategic", "ue_improved_cal", "leeds_lad_2015_2025")
+r_n4_bch = mrow("N4_csis_strategic", "ue_improved_cal", "aadtbench_leeds_v1")
+
+dft_maj_mvkm = float(vkm_ref.loc[vkm_ref["road_category"] == "ALL_MAJOR", "mvkm_day_postcovid"].iloc[0])
+dft_all_mvkm = float(vkm_ref.loc[vkm_ref["road_category"] == "IMPLIED_ALL_ROADS_DFT_SHARE", "mvkm_day_postcovid"].iloc[0])
+```
+
+## Abstract {.unnumbered}
+
+Strategic highway assignment in UK local authorities has historically relied on proprietary software packages (such as SATURN or PTV Visum) paired with manually curated skeletal networks that cannot be openly redistributed or independently audited. Open-source equilibrium solvers such as AequilibraE and global crowd-sourced street data from OpenStreetMap (OSM) make fully transparent, scriptable assignment possible in principle, yet uncleaned OSM graphs suffer from fragmented degree-2 chains, duplicated dual-carriageway geometry, unattributed lane capacities, and spurious dead-end snapping. In this paper, we build and validate a reproducible central estimate of daily motor traffic Annual Average Daily Traffic (AADT) across the Leeds Local Authority District (`E08000035`, $550.6\text{ km}^2$) using AequilibraE (`v1.7.2`) and open Rust network-processing tools from the `csis` ecosystem (`osmget`, `osmactive`, `netfit`/`netclean`, and `netweld`). Evaluating five network representations (`N0` unfiltered raw OSM through `N4` modal-filter-severed strategic network) and seven progressive assignment formulations against Department for Transport (DfT) post-COVID AADF counts ($n = 194$ sites in Leeds LAD; $n = 349$ across 2015–2025) under 5-fold $3\text{ km}$ spatial block cross-validation, we find three principal results. First, minimal topological pruning (`N2`: motor filter, largest component, dead-end trimming, and degree-2 welding) reduces link count in Leeds LAD by $66\%$ ($90{,}993 \to 30{,}561$) and halves Bi-Conjugate Frank-Wolfe (BFW) User Equilibrium runtime ($9.0\text{ s} \to 4.9\text{ s}$), but leaves linear correlation unchanged ($r = 0.649 \to 0.648$) when capacities and speeds remain generic road-class defaults. Second, pairing 14-stage topological junction and dual-carriageway consolidation (`netclean`) with length-weighted directional lane and speed-limit conflation (`netweld`), modal-filter barrier severance (`osmactive`), multi-class (`car`/`heavy`) BFW equilibrium, and Strategic Road Network (SRN) cordon gateways raises **uncalibrated, strictly flow-conserving physical assignment** correlation from $r = 0.749$ on `N2` to $r = 0.850$ on `N3` ($\rho = 0.874$, $\text{MAE} = 10{,}323\text{ veh/day}$). Third, out-of-fold spatial calibration (`N4 + ue_improved_cal`) achieves $r = 0.880$ ($\rho = 0.857$, $\text{MAE} = 8{,}922\text{ veh/day}$, median APE $25.8\%$, WebTAG $\text{GEH} < 5$ on $28.5\%$ of sites) on post-COVID counts and $r = 0.899$, $\rho = 0.903$ ($\text{GEH} < 5 = 31.6\%$) on the 348-site 2015–2025 dataset, while reproducing DfT-implied network-wide Leeds traffic ($17.35\text{ M}$ vs $19.37\text{ M}$ motor-vehicle-km/day) compared with $9.70\text{ M}$ for an uncritical raw OSM All-or-Nothing baseline ($r = 0.591$, $\text{MAE} = 19{,}124\text{ veh/day}$, $\text{GEH} < 5 = 6.7\%$).
+
+---
+
+## Introduction
+
+Link-level estimates of Annual Average Daily Traffic (AADT) across an entire urban road network—spanning strategic motorways down to local collector and residential streets—are a foundational input for air-quality dispersion modelling, road-safety risk exposure, decarbonisation appraisal, and active-travel reallocation schemes [@dft2024tag]. In UK local government practice, area-wide traffic estimates have traditionally been produced using commercial assignment suites such as SATURN [@vanvliet1982saturn], PTV Visum, or Aimsun. While mature at modelling junction delay on manually coded cordons, traditional proprietary models entail three structural barriers to "expansive" network-wide modelling: (i) licensing restricts model sharing, peer review, and continuous integration; (ii) skeletal networks omit the vast majority of minor urban streets where active travel and residential exposure occur; and (iii) manual junction coding makes automated updates from evolving street layouts prohibitively expensive.
+
+Open-source transport modelling libraries—most notably **AequilibraE** [@camargo2024aequilibrae], which implements parallelised All-or-Nothing (AON) and Bi-Conjugate Frank-Wolfe (BFW) Wardrop User Equilibrium [@wardrop1952road; @mitradjieva2013bfw]—combined with OpenStreetMap (OSM) street networks offer a transparent alternative. Recent benchmarking in `aadtbench` [@lovelace2026aadtbench] demonstrated that AequilibraE `aon` and `ue_bfw` configurations achieve competitive rank correlations on synthetic origin–destination (OD) demand. However, raw OSM extracts were designed for cartography and turn-by-turn navigation rather than macroscopic equilibrium assignment [@boeing2017osmnx; @boeing2025simplification; @fleischmann2026neatnet]. Feeding raw planar-split OSM ways directly into highway assignment introduces severe topological and physical distortions:
+
+1. **Vertex fragmentation and disconnected components**: Every pedestrian crossing, change in surface tag, or administrative boundary splits an OSM way, inflating graph size by $2\text{--}4\times$ and leaving hundreds of isolated parking-lot and service-road islands.
+2. **Unconsolidated junctions and dual carriageways**: Grade-separated gyratories and roundabouts appear as dozens of short interlocking segments, while generic road-class capacities treat a 1-lane slip road identically to a 4-lane motorway carriageway unless OSM `lanes` and `maxspeed` attributes are preserved across simplification.
+3. **Count-site crosswalk false snapping**: Permanent and manual count pins with minor GPS offsets adjacent to industrial estates or service yards can snap to zero-flow dead-end driveways within standard $30\text{ m}$ search tolerances.
+4. **Boundary starvation on finite cordons**: Assigning internal synthetic zone-to-zone trips alone omits external-to-internal and through strategic motorway trips (such as M1 north–south and M62 east–west trans-Pennine traffic around Leeds).
+
+This paper addresses three research questions:
+
+1. **Network cleaning**: How much do progressive open-source cleaning pipelines—comparing raw OSM (`N0`, `N1`), minimal Python topological pruning (`N2`), and the Rust `csis` toolchain (`osmget`, `osmactive`, `netfit`/`netclean`, and `netweld` in `N3` and `N4`) [@lovelace2026csis]—reduce graph complexity and assignment runtime, and when does cleaning translate into higher count validation accuracy?
+2. **Physical equilibrium vs benchmark heuristics**: How do physically grounded multi-class (`car`/`heavy`) BFW equilibrium improvements—incorporating `netweld` lane capacities, `osmactive` modal-filter barriers, and Strategic Road Network (SRN) perimeter gateways—compare against the baseline `aadtbench` AequilibraE settings?
+3. **Central Leeds LAD AADT estimate**: How accurately does the resulting open pipeline reproduce DfT count observations across the road hierarchy (`TM`, `PM`, `PA`, `TA`, `MB`, `MCU`) and aggregate motor-vehicle-kilometres per day (MVKM/day) across the Leeds Local Authority District?
+
+---
+
+## Study Area and Data Inputs
+
+### Spatial Domain: Cordon Buffer vs Leeds LAD Evaluation
+
+The target administrative domain is the **Leeds Local Authority District** (`LAD24CD = E08000035`, area $550.64\text{ km}^2$ in British National Grid `EPSG:27700`), read from `data/leeds-lad.geojson` (Office for National Statistics, Open Government Licence v3.0). Raw OpenStreetMap network data (`source.osm.pbf` and `network.parquet`) and Tier-2 synthetic demand inputs (`od_synthetic.parquet`, `zones.parquet`, `population.parquet`, `pois.parquet`) are drawn from the `aadtbench` `leeds-v1` benchmark case [@lovelace2026aadtbench], defined as a $15\text{ km}$-radius circular disc ($705.7\text{ km}^2$) centred on central Leeds (`-1.5437941, 53.7974185`).
+
+Crucially, the $15\text{ km}$ `leeds-v1` disc covers **$100\%$ ($479 / 479$) of all DfT traffic count sites located inside Leeds LAD** (leaving only uncounted rural fringes at the extreme north-eastern Wetherby/Boston Spa edge outside the $15\text{ km}$ radius), while extending across metropolitan boundaries into Bradford, Wakefield, and Kirklees. Following standard highway-modelling practice [@dft2024tag], we execute traffic assignment over the **full $15\text{ km}$ cordon** so orbital and boundary trips around the M62, M1, and A6120 Outer Ring Road are free of artificial boundary truncation, and clip link predictions and validation sites strictly to `data/leeds-lad.geojson` for Leeds LAD reporting.
+
+### DfT AADF Count Data and Network VKM Reference
+
+Observed traffic counts in `data/dft/` were normalised by `countsget` (`atf-lab/countsget`, OGL v3.0) [@dft2025roadtraffic] into `sites.parquet` ($573$ sites across the wider region, $479$ inside Leeds LAD), `channels.parquet` ($6{,}254$ directional/class channels with `measure = mean_daily`), `observations.parquet` ($34{,}720$ annual site-channel rows spanning 2000–2025), and `summary_dft.parquet`. We aggregate annual `mean_daily` vehicle classes into three targets:
+
+- **All motor vehicles (`motor`)**: cars and taxis (`motor.car`) + two-wheeled motor vehicles (`motor.two_wheeler`) + light vans (`motor.lgv`) + buses and coaches (`motor.heavy.bus`) + rigid and articulated heavy goods vehicles (`motor.heavy.hgv.*`).
+- **Light motor vehicles (`car`)**: `motor.car + motor.lgv + motor.two_wheeler`.
+- **Heavy vehicles (`heavy`)**: `motor.heavy.bus + motor.heavy.hgv.rigid + motor.heavy.hgv.artic`.
+
+Averaging annual `motor` totals over the post-COVID period **2021–2025** reproduces `summary_dft.parquet` (`car + heavy + other`) to machine precision (maximum discrepancy $1.46 \times 10^{-11}\text{ veh/day}$) across **$194$ active sites inside Leeds LAD** ($151$ Major road sites and $43$ Minor road sites). Because many UK minor-road (`MB`, `MCU`) manual counts are surveyed on multi-year rotating cycles, we also construct an extended modern validation set (**2015–2025**, **$349$ sites** inside Leeds LAD, including $135$ minor-road sites; pre- vs post-COVID spatial correlation across overlapping Leeds Major sites is $r = 0.9963$ with volume ratio $0.9629$) and evaluate external generalisation on the `aadtbench` `leeds-v1` benchmark table ($n = 417$ motor sites across the full $15\text{ km}$ disc).
+
+To benchmark network-wide traffic totals, we extract the official DfT segment length (`link_length_km`) attached to every Major Road Network count point in `sites.parquet` (`216` Major road links inside Leeds LAD totalling $400.1\text{ km}$ across `TM` Trunk Motorways, `PM` Principal Motorways, `TA` Trunk A-roads, and `PA` Principal A-roads). Summing $\text{AADF}_i \times L_i$ yields an empirical post-COVID **Leeds LAD Major Road Network total of `{python} f"{dft_maj_mvkm:.2f}"` million motor-vehicle-km/day** ($6.08\text{ M}$ on `TM`, $0.19\text{ M}$ on `PM`, $0.05\text{ M}$ on `TA`, and $6.28\text{ M}$ on `PA`), corresponding to **`{python} f"{dft_all_mvkm:.2f}"` million motor-vehicle-km/day across all roads** at the standard DfT urban metropolitan Major-road traffic share ($\approx 65\%$; consistent with DfT Table `TRA8904` reporting $\approx 4.23\text{ billion}$ annual vehicle-miles $\approx 18.65\text{ M}$ veh-km/day for Leeds).
+
+---
+
+## Methods
+
+### Five-Stage Network Cleaning Study and Tool Attributions
+
+To isolate the structural, computational, and predictive effects of network cleaning, `scripts/02_clean_networks.py` constructs five progressive network representations from the identical `leeds-v1` OSM source (`source.osm.pbf`):
+
+1. **`N0_raw_unfiltered` (Uncritical Raw OSM)**: All $230{,}330$ planar-split OSM highway segments from `leeds-v1/network.parquet` (`pyosmium` builder in `aadtbench` commit `56d886d`) with `allow_car = True` forced across all highway classes (including footways, cycleways, steps, and tracks). This represents an uncritical analyst baseline where raw OSM ways are routed without modal filtering or graph simplification.
+2. **`N1_raw_motor` (Raw Motor-Accessible OSM)**: The standard `aadtbench` motor graph retaining `allow_car == True` segments ($143{,}151$ links across the $15\text{ km}$ cordon; $90{,}993$ intersecting Leeds LAD), with zero topological simplification, leaving $516$ disconnected components and short $45.9\text{ m}$ mean link fragments.
+3. **`N2_minimal_python` (Minimal Topological Clean)**: Implemented in Python (`geopandas`, `scipy.sparse.csgraph`, and `shapely.line_merge`), applying: (i) motor-accessible filtering; (ii) extraction of the single largest weakly connected component ($100\%$ LCC share); (iii) 12-pass iterative dead-end leaf trimming of `service` links and $< 250\text{ m}$ `minor`/`other` stubs (protecting perimeter cordon nodes at $r \ge 14.2\text{ km}$ so radial arterials are never truncated); and (iv) homogeneous degree-2 node welding across collinear links sharing identical `(road_class, dir_car, allow_heavy, name, ref)`.
+4. **`N3_csis_netclean` (`csis` Open Rust Toolchain)**: A multi-crate Rust pipeline combining four open repositories from the `csis` ecosystem [@lovelace2026csis]:
+   - **`osmget`** (`robinlovelace/osmget`, commit `2374fcf`): Extracts $150{,}529$ highway ways (`osmget extract -p all`, $0.38\text{ s}$) and $10{,}739$ point barrier nodes (`osmget barriers`) directly from `source.osm.pbf`.
+   - **`osmactive`** (`atf-lab/osmactive`, commit `0173318`, UK rulebook `rules/gb.toml`): Derives UK-specific legal and physical motor access (`allow_car`, `allow_heavy`, directional `dir_car`) and classifies point barriers (`bollard`, `modal_filter`, `bus_trap`, `gate`, `lift_gate`), identifying $379$ motor-blocking modal filters on motor-accessible ways.
+   - **`netfit` / `netclean`** (`atf-lab/netfit`, commit `537fec2`, embedding `robinlovelace/netclean`): Runs a 14-stage Rust graph cleaner (`netfit network`, $2.9\text{ s}$) performing endpoint snapping, deduplication, LCC extraction, intersection consolidation by road hierarchy (`consolidate_by_class`), gap snapping, connector removal, iterative side-spine despining (`despine_mid`, `despine_last`), short parallel carriageway merging (`merge_parallel`), degree-2 ironing (`iron`), and barrier node splitting, followed by `osmactive continuity` (`--max-m 30`).
+   - **`netweld`** (`atfutures/netweld`, commit `c0a7a12`): Performs length-weighted spatial buffer-and-bearing conflation (`netweld join --distance 12 --angle 25`, $0.3\text{ s}$) to transfer parsed directional lane counts (`dir_lanes` from `lanes`, `lanes:forward`, `lanes:backward`, and one-way tags) and posted speed limits (`maxspeed` converted from `mph`/NSL tags to $\text{km/h}$) from raw ways onto the consolidated `netclean` links.
+5. **`N4_csis_strategic` (`csis` Strategic Motor Network)**: Refines `N3_csis_netclean` by pruning non-through private/parking ways (`highway` $\in$ `{service, track, footway, path, cycleway, pedestrian, steps, bridleway}`), topologically severing node connectivity across all $379$ `osmactive`-identified car-blocking modal filters so assignment cannot rat-run through filtered neighbourhoods, and retaining the resulting largest weakly connected motor component ($58{,}010$ links full cordon; $36{,}232$ links in Leeds LAD).
+
+### Count-to-Link Spatial Crosswalk
+
+DfT AADF count points report two-way daily motor flows alongside `road_name` (e.g. `M621`, `A61`, `A660`) and `road_category`. Following the `aadtbench` crosswalk contract (`benchmark/crosswalk.py`), each count site is matched to motor-accessible links within a $30\text{ m}$ Euclidean radius in `EPSG:27700` using a four-tier priority rule: (i) exact normalised match between site `road_name` and OSM `name` or semicolon-split `ref` tokens; (ii) highest `road_class` rank within $10\text{ m}$ of the closest candidate; (iii) longest link within a $1\text{ m}$ distance tie; and (iv) automatic **dual-carriageway pairing**, which adds the opposite one-way carriageway (`dir_car != 'both'`) within $50\text{ m}$ sharing road name/class with travel bearing difference $> 135^\circ$, summing both carriageways to match DfT's two-way AADF definition.
+
+### Traffic Assignment and Calibration Formulations
+
+#### Baseline `aadtbench` Configurations and Diagnostic Audit
+
+We replicate the exact `aadtbench` AequilibraE starting variants (`adapters/aequilibrae.py`):
+
+- **`aon` (`aon_physical` and `aon_aadtbench`)**: All-or-Nothing assignment on free-flow travel time $t_0 = L / (v_{\text{class}} / 3.6)$ using `CLASS_SPEED_KMH` (`motorway` $100$, `trunk` $80$, `primary` $50$, `secondary` $45$, `tertiary` $40$, `minor` $30$, `service` $15\text{ km/h}$) and `od_synthetic.parquet` summed over `car` + `heavy`.
+- **`ue_bfw` (`ue_bfw_physical` and `ue_bfw_aadtbench`)**: Bi-Conjugate Frank-Wolfe User Equilibrium (`max_iter = 20`, `rgap = 1e-3`, Bureau of Public Roads [@bpr1964traffic] volume–delay function $t(q) = t_0 [1 + \alpha (q/C)^\beta]$ with $\alpha = 0.15, \beta = 4.0$), scaling daily OD demand by `peak_hour_factor = 0.10` (and multiplying assigned hourly flows by $10$) against `CLASS_CAPACITY_VPH` (`motorway` $2{,}200$, `trunk` $1{,}800$, `primary` $900$, `secondary` $600$, `tertiary` $400$, `minor` $250$, `service` $100\text{ vph}$).
+
+Auditing `adapters/_base.py` and `adapters/aequilibrae.py` revealed four structural issues that limit physical assignment accuracy on urban networks:
+
+1. **Non-conserving post-hoc flow compression (`modulate_segment_flow`)**: The default `aadtbench` adapter transforms assigned link flows via $\tilde{q}_e = [(q_e + 0.03\,\text{med}(q_+))\,c_{\text{class}}^{0.7}]^{0.50}$. While the square-root exponent ($\gamma = 0.50$) compresses dynamic range to improve log-space $R^2$ when link capacities are mis-specified, it violates Kirchoff junction flow conservation and injects uniform background traffic onto dead-end cul-de-sacs. We therefore evaluate every baseline **both** as physical flow-conserving assignment (`*_physical`) and with `aadtbench` modulation (`*_aadtbench`).
+2. **Discontinuous `cap_km` demand-scale cliff**: `adapters/aequilibrae.py` contains a guard `if trip_sum * scale > 0.09 * cap_km: scale = 0.005 * cap_km / trip_sum` that slashes peak demand by $\approx 18\times$ if network pruning reduces aggregate capacity-kilometres below `trip_sum / 0.9`, abruptly collapsing congestion UE into free-flow AON (`N4` sits within $6\%$ of this cliff at $215\text{k}$ vs $229\text{k}$).
+3. **Unrealistic $50\%$ HGV share in summed synthetic OD**: `od_synthetic.parquet` generates $1.304\text{ M}$ daily `car` trips and $1.304\text{ M}$ daily `heavy` trips; summing them unweighted assumes half of all vehicles are heavy goods/buses (vs $\approx 9\text{--}10\%$ in DfT Leeds counts).
+4. **Single-lane capacities and zero SRN cordon demand**: Assigning `motorway = 2,200 vph` (one lane) without external motorway gateways starves the 3–4 lane M1, M62, and M621 corridors (`TM` predicted $42.5\text{k}$ vs observed $78.8\text{k}$ on `N1 + ue_bfw_physical`) while over-congesting internal `PA` A-roads ($31.8\text{k}$ vs observed $22.3\text{k}$).
+
+#### Improved Multi-Class Physical Equilibrium (`ue_improved_phys`) and Spatial Calibration (`ue_improved_cal`)
+
+Our improved configuration addresses each physical limitation within AequilibraE (`scripts/03_run_assignments.py`):
+
+- **`netweld` directional lane capacities and posted speeds**: Link capacity is set to $C_e = n_{\text{lanes},e} \times C_{\text{lane}}(\text{highway}_e)$, where $n_{\text{lanes},e}$ is the `netweld`-transferred per-direction lane count (raising 3–4 lane motorways to $6{,}600\text{--}8{,}800\text{ vph/direction}$) and free-flow time uses `netweld` posted `maxspeed` ($0.96\times$ posted speed on motorways/trunks, $0.85\times$ on urban signalised streets).
+- **Multi-class BFW User Equilibrium**: Separate `TrafficClass` instances are assigned simultaneously for light motor vehicles (`car`, $\text{PCE} = 1.0$) and heavy vehicles (`heavy`, $\text{PCE} = 2.0$, free-flow speed capped at $90\text{ km/h}$, $1.6\times$ impedance on residential streets), using `max_iter = 25`, `rgap_target = 5e-4`, and `phf = 0.085`, with realistic modal trip scaling ($\approx 9.5\%$ heavy share).
+- **Strategic Road Network (SRN) perimeter gateways**: Ten motorway and trunk cordon portals (`M1` North/South, `M62` East/West, `A1(M)`/`A64`, `A658`, `A65`, `A650`, `A62`) are identified automatically where SRN links intersect $r \ge 14.2\text{ km}$ (clustered in $18^\circ$ angular sectors), generating capacity-weighted through-trips (`dang >= 80°`, $d \ge 14\text{ km}$) and external–internal gravity exchanges with internal zones.
+- **Spatially blocked out-of-fold calibration (`ue_improved_cal`)**: While `ue_improved_phys` ($k = 1$) preserves exact Kirchoff flow conservation without touching count data, synthetic gravity OD on $1\text{ km}$ zones inevitably under-loads intrazonal local streets. Following the two-stage physical-assignment + statistical-calibration paradigm of `csis`/`netfit`, we fit an $L_2$-regularised log-linear model ($\alpha = 1.0$) across **5 spatially blocked $3\text{ km} \times 3\text{ km}$ cross-validation folds** [@roberts2017blockcv] (`seed = 42`):
+  $$\log(y_i) = \beta_0 + \beta_1 \log(\max(q_{\text{UE},i}, 50)) + \beta_2 \mathbb{I}(q_{\text{UE},i} < 50) + \beta_3 \log(C_{2\text{way},i}) + \gamma_{\text{class}(i)} + \varepsilon_i$$
+  retransformed to natural vehicle/day units via Duan's non-parametric smearing estimator $\hat{s} = \frac{1}{n_{\text{tr}}}\sum_{j \in \text{tr}} \exp(e_j)$ [@duan1983smearing]. Separate sub-models for `car` and `heavy` are proportionally reconciled so $\widehat{\text{AADT}}_{\text{car}} + \widehat{\text{AADT}}_{\text{heavy}} \equiv \widehat{\text{AADT}}_{\text{motor}}$ on every link.
+
+### Validation Metrics
+
+All site-level metrics are evaluated strictly out-of-fold across the five $3\text{ km}$ spatial blocks: linear Pearson $r$, rank Spearman $\rho$, Mean Absolute Error (MAE), Mean and Median Absolute Percentage Error (MAPE, MedAPE), linear $R^2$, $\log(1+y)$ $R^2$, and the UK DfT WebTAG [@dft2024tag] peak-hour Geoffrey E. Havers (GEH) statistic using the standard $10\%$ peak-hour factor ($M = 0.1\hat{y}, C = 0.1 y$):
+$$\text{GEH}_i = \sqrt{\frac{2(0.1\hat{y}_i - 0.1 y_i)^2}{0.1\hat{y}_i + 0.1 y_i}}$$
+reporting the percentage of count sites achieving $\text{GEH} < 5$ and $\text{GEH} < 10$, alongside aggregate Leeds LAD Major-road and All-road daily motor-vehicle-kilometres (MVKM/day).
+
+---
+
+## Results
+
+### Topological Impact of Network Cleaning
+
+@tbl-network-summary summarises the geometric and topological properties of the five network variants across both the $15\text{ km}$ assignment cordon and the clipped Leeds LAD boundary, while @tbl-netclean-steps and @fig-cleaning detail the 14-stage Rust `netclean` progression.
+
+```{python}
+#| label: tbl-network-summary
+#| tbl-cap: "Topological and geometric comparison of the five network variants across the full 15 km assignment cordon and clipped to Leeds LAD (`E08000035`). Note that while `N2`–`N4` form a single connected component (100% LCC) over the assignment cordon, clipping by the irregular administrative boundary slices boundary-crossing roads into 13–21 chord segments."
+disp_net = net_sum.copy()
+disp_net["Scope"] = disp_net["scope"].map({"full_15km_cordon": "15 km cordon", "leeds_lad": "Leeds LAD"})
+disp_net["Links"] = disp_net["n_links"].map(lambda x: f"{x:,}")
+disp_net["Net km"] = disp_net["network_km"].map(lambda x: f"{x:,.1f}")
+disp_net["Major km"] = disp_net["major_road_km"].map(lambda x: f"{x:,.1f}")
+disp_net["Comp."] = disp_net["n_components"].map(lambda x: f"{x:,}")
+disp_net["LCC (%)"] = disp_net["lcc_link_share_pct"].map(lambda x: f"{x:.2f}%")
+disp_net["Mean len (m)"] = disp_net["mean_link_length_m"].map(lambda x: f"{x:.1f}")
+disp_net["Clean (s)"] = disp_net["build_time_s"].map(lambda x: f"{x:.2f}")
+cols_n = ["variant_id", "Scope", "Links", "Net km", "Major km", "Comp.", "LCC (%)", "Mean len (m)", "Clean (s)"]
+Markdown(disp_net[cols_n].rename(columns={"variant_id": "Variant"}).to_markdown(index=False))
+```
+
+Filtering raw OSM (`N0`, `{python} f"{int(nrow('N0_raw_unfiltered')['n_links']):,}"` links / `{python} f"{nrow('N0_raw_unfiltered')['network_km']:,.1f}"` km in Leeds LAD) to motor-accessible ways (`N1`) removes footways and cycle tracks, leaving `{python} f"{int(nrow('N1_raw_motor')['n_links']):,}"` links (`{python} f"{nrow('N1_raw_motor')['network_km']:,.1f}"` km) fragmented across `{python} f"{int(nrow('N1_raw_motor', 'full_15km_cordon')['n_components']):,}"` disconnected components on the $15\text{ km}$ cordon (`328` inside Leeds LAD) with a mean link length of just `{python} f"{nrow('N1_raw_motor')['mean_link_length_m']:.1f}"` m. Minimal Python cleaning (`N2`) contracts degree-2 chains and trims dead-end service/minor leaves, reducing Leeds LAD link count by $66.4\%$ to `{python} f"{int(nrow('N2_minimal_python')['n_links']):,}"` links (`{python} f"{nrow('N2_minimal_python')['network_km']:,.1f}"` km) and doubling mean link length to `{python} f"{nrow('N2_minimal_python')['mean_link_length_m']:.1f}"` m in $8.24\text{ s}$.
+
+However, `N2` preserves all $561.9\text{ km}$ of raw Major road geometry unchanged, leaving multi-node gyratories and duplicate slip-road fragments intact (@fig-cleaning, panel b). By contrast, the Rust `csis` pipeline (`N3` and `N4`) executes in just **$5.32\text{ s}$**—faster than the Python minimal script—while consolidating **$18.4\text{ km}$ of duplicate Major-road junction and parallel-carriageway geometry** inside Leeds LAD ($561.9 \to 543.4\text{ km}$), welding directional lane counts and posted speed limits via `netweld`, and severing $379$ modal-filter barriers (`N4`: `{python} f"{int(nrow('N4_csis_strategic')['n_links']):,}"` links, `{python} f"{nrow('N4_csis_strategic')['network_km']:,.1f}"` km in Leeds LAD).
+
+```{python}
+#| label: tbl-netclean-steps
+#| tbl-cap: "Step-by-step graph reduction across the 14-stage Rust `netclean` (`netfit network`) pipeline on the 15 km Leeds motor network."
+st = step_log[["step_order", "step", "nodes", "edges", "length_km", "components"]].copy()
+st["nodes"] = st["nodes"].map(lambda x: f"{x:,}")
+st["edges"] = st["edges"].map(lambda x: f"{x:,}")
+st["length_km"] = st["length_km"].map(lambda x: f"{x:,.1f}")
+st["components"] = st["components"].map(lambda x: f"{x:,}")
+Markdown(st.rename(columns={
+    "step_order": "#", "step": "Pipeline stage", "nodes": "Nodes",
+    "edges": "Edges", "length_km": "Length (km)", "components": "Components"
+}).to_markdown(index=False))
+```
+
+Crucially, topological despining in `N2`–`N4` also resolves a count-site crosswalk pathology on `N1_raw_motor` (@fig-cleaning, panel d): DfT site `dft:95072` (`road_name = 'A61'`, `PA`, observed $22{,}852\text{ veh/day}$) has a legacy coordinate pin offset $147.3\text{ m}$ east of A61 Wakefield Road inside a Stourton industrial estate. On `N0` and `N1`, the $30\text{ m}$ crosswalk falsely snaps `dft:95072` to a dead-end `highway=service` yard driveway (`0` assigned flow); `netclean` despines that $< 40\text{ m}$ stub, cleanly excluding the mis-located pin ($193 / 194$ post-COVID Leeds LAD sites matched cleanly).
+
+![Topological network cleaning in Leeds: (a–c) 1.2 km × 1.2 km zoom of Armley Gyratory and A58(M) Leeds Inner Ring Road across `N1`, `N2`, and `N4`; (d) elimination of the `dft:95072` Stourton industrial driveway false-snap; (e) 14-stage Rust `netclean` node, edge, and component reduction waterfall.](figs/fig1_network_cleaning.png){#fig-cleaning width="100%"}
+
+### Validation Against Leeds LAD DfT Counts and Benefit of Cleaning
+
+@tbl-validation-main reports the primary validation matrix across all five networks on the post-COVID Leeds LAD DfT dataset (`2021–2025`), while @fig-scatter and @fig-ablation illustrate site-level agreement and stepwise methodological ablation.
+
+```{python}
+#| label: tbl-validation-main
+#| tbl-cap: "Out-of-sample validation against post-COVID Leeds LAD DfT AADF counts (2021–2025, 5-fold 3 km spatial block CV). DfT empirical reference totals for Leeds LAD: 12.59 M motor-veh-km/day on Major roads and 19.37 M motor-veh-km/day implied across all roads."
+keep_pairs = [
+    ("N0_raw_unfiltered", "aon_physical", "N0 Raw all + AON (uncritical)"),
+    ("N0_raw_unfiltered", "ue_bfw_physical", "N0 Raw all + UE-BFW (phys)"),
+    ("N1_raw_motor", "aon_physical", "N1 Raw motor + AON (phys)"),
+    ("N1_raw_motor", "aon_aadtbench", "N1 Raw motor + AON (aadtbench)"),
+    ("N1_raw_motor", "ue_bfw_physical", "N1 Raw motor + UE-BFW (phys)"),
+    ("N1_raw_motor", "ue_bfw_aadtbench", "N1 Raw motor + UE-BFW (aadtbench)"),
+    ("N1_raw_motor", "ue_improved_phys", "N1 Raw motor + UE-Improved (phys k=1)"),
+    ("N1_raw_motor", "ue_improved_cal", "N1 Raw motor + UE-Improved (OOF cal)"),
+    ("N2_minimal_python", "aon_physical", "N2 Min Python + AON (phys)"),
+    ("N2_minimal_python", "ue_bfw_physical", "N2 Min Python + UE-BFW (phys)"),
+    ("N2_minimal_python", "ue_improved_phys", "N2 Min Python + UE-Improved (phys k=1)"),
+    ("N2_minimal_python", "ue_improved_cal", "N2 Min Python + UE-Improved (OOF cal)"),
+    ("N3_csis_netclean", "ue_bfw_physical", "N3 CSIS full + UE-BFW (phys)"),
+    ("N3_csis_netclean", "ue_improved_phys", "N3 CSIS full + UE-Improved (phys k=1)"),
+    ("N3_csis_netclean", "ue_improved_cal", "N3 CSIS full + UE-Improved (OOF cal)"),
+    ("N4_csis_strategic", "aon_physical", "N4 CSIS strat + AON (phys)"),
+    ("N4_csis_strategic", "ue_bfw_physical", "N4 CSIS strat + UE-BFW (phys)"),
+    ("N4_csis_strategic", "ue_welded_internal", "N4 CSIS strat + UE-BFW + netweld"),
+    ("N4_csis_strategic", "ue_improved_phys", "N4 CSIS strat + UE-Improved (phys k=1)"),
+    ("N4_csis_strategic", "ue_improved_cal", "N4 CSIS strat + UE-Improved (OOF cal)"),
+]
+rows_v = []
+for nid, aid, lbl in keep_pairs:
+    r = mrow(nid, aid, "leeds_lad_2021_2025")
+    rows_v.append({
+        "Configuration": lbl,
+        "n": int(r["n_sites_matched"]),
+        "r": f"{r['pearson_r']:.3f}",
+        "ρ": f"{r['spearman_rho']:.3f}",
+        "MAE": f"{r['mae']:,.0f}",
+        "MAPE": f"{r['mape_pct']:.1f}%",
+        "MedAPE": f"{r['median_ape_pct']:.1f}%",
+        "GEH<5": f"{r['geh_lt_5_pct']:.1f}%",
+        "GEH<10": f"{r['geh_lt_10_pct']:.1f}%",
+        "Maj MVKM": f"{r['lad_mvkm_day_major']:.2f}M",
+        "All MVKM": f"{r['lad_mvkm_day_all']:.2f}M",
+        "Time": f"{r['wall_time_s']:.1f}s",
+    })
+Markdown(pd.DataFrame(rows_v).to_markdown(index=False))
+```
+
+Four key findings emerge from @tbl-validation-main and @fig-ablation:
+
+1. **Failure of the uncritical baseline (`N0 + AON`)**: Routing synthetic OD on unfiltered OSM free-flow times concentrates traffic onto shortest-time spines while leaving parallel arterials and local collectors empty ($17$ count sites receive near-zero flow), yielding $r = `{python} f"{r_uncrit['pearson_r']:.3f}"`$, $\text{MAE} = `{python} f"{r_uncrit['mae']:,.0f}"`\text{ veh/day}$, $\text{GEH} < 5 = `{python} f"{r_uncrit['geh_lt_5_pct']:.1f}"`\%$, and under-predicting Leeds LAD traffic by half ($`{python} f"{r_uncrit['lad_mvkm_day_all']:.2f}"`\text{ M}$ vs $19.37\text{ M}$ MVKM/day). Introducing congestion via BPR User Equilibrium (`N1 + ue_bfw_physical`) redistributes flow across parallel corridors, cutting MAE to $`{python} f"{r_base_ue['mae']:,.0f}"`\text{ veh/day}$ and more than doubling $\text{GEH} < 5$ to $`{python} f"{r_base_ue['geh_lt_5_pct']:.1f}"`\%$.
+2. **Why topological pruning alone (`N2`) is necessary for speed but insufficient for accuracy**: Moving from `N1_raw_motor` to `N2_minimal_python` cuts `ue_bfw` wall-clock time nearly in half ($9.0\text{ s} \to 4.9\text{ s}$), yet leaves accuracy virtually unchanged ($r = 0.649 \to 0.648$). Without lane-count and speed conflation, cleaned links still suffer from uniform single-lane capacities.
+3. **Synergy between `csis` graph consolidation (`netclean`) and attribute conflation (`netweld`)**: When `ue_improved_phys` (strictly Kirchoff-conserving, zero count calibration, $k = 1$) is run on `N1` or `N2` (which lack `netweld` lane counts and consolidated gyratories), Pearson correlation reaches $r = 0.752$ and $0.749$ ($\text{MAE} \approx 13{,}500$). Running the **exact same physical model** on `N3_csis_netclean` and `N4_csis_strategic` leaps linear correlation by **$+0.10$** to **$r = `{python} f"{r_n3_phys['pearson_r']:.3f}"`$ (`N3`) and $`{python} f"{r_n4_phys['pearson_r']:.3f}"`$ (`N4`)** ($\rho = `{python} f"{r_n3_phys['spearman_rho']:.3f}"`$, $\text{MAE} = `{python} f"{r_n3_phys['mae']:,.0f}"`\text{ veh/day}$, runtime $8.2\text{ s}$). Even before adding SRN gateways (`N4 + ue_welded_internal`), transferring `netweld` directional lanes and posted `maxspeed` onto `N4` boosts `ue_bfw` from $r = 0.634 \to 0.784$ and $\rho = 0.781 \to 0.856$!
+4. **Spatial calibration (`ue_improved_cal`) and multi-dataset generalisation**: Applying 5-fold $3\text{ km}$ spatially blocked calibration on `N4_csis_strategic` achieves **$r = `{python} f"{r_n4_cal['pearson_r']:.3f}"`$** (`N3`: **`{python} f"{r_n3_cal['pearson_r']:.3f}"`**), cutting MAE to **`{python} f"{r_n4_cal['mae']:,.0f}"` veh/day** (`N3`: **`{python} f"{r_n3_cal['mae']:,.0f}"`**), lowering Median APE to **`{python} f"{r_n4_cal['median_ape_pct']:.1f}"`%**, raising **$\text{GEH} < 5$ to `{python} f"{r_n4_cal['geh_lt_5_pct']:.1f}"`%** ($\text{GEH} < 10 = `{python} f"{r_n4_cal['geh_lt_10_pct']:.1f}"`\%$), and predicting **`{python} f"{r_n4_cal['lad_mvkm_day_all']:.2f}"` M motor-veh-km/day** across Leeds LAD (`N3`: $18.33\text{ M}$ vs $19.37\text{ M}$ DfT reference). Separate sub-mode out-of-fold correlations on `N4` reach **$r = 0.879$ for light motor vehicles** and **$r = 0.827$ for heavy vehicles**.
+
+![Out-of-sample validation against post-COVID Leeds LAD DfT motor counts (`2021–2025`, 5-fold 3 km spatial CV) across (a) uncritical raw OSM + AON, (b) benchmark `N1 + UE-BFW`, (c) uncalibrated flow-conserving `N4 + UE-Improved (k=1)`, and (d) out-of-fold calibrated `N4 + UE-Improved`. Green shading denotes the UK WebTAG $\text{GEH} < 5$ acceptance envelope.](figs/fig3_validation_scatter.png){#fig-scatter width="100%"}
+
+![(a) Sensitivity of linear correlation $r$ across network cleaning stages `N0`–`N4`; (b) 7-stage methodological ablation on WebTAG $\text{GEH} < 5$ and $\text{GEH} < 10$ pass rates; (c) modelled Leeds LAD Major-road and Minor-road daily motor-vehicle-km (MVKM/day) against DfT empirical references.](figs/fig4_cleaning_and_ablation.png){#fig-ablation width="100%"}
+
+To verify that these gains are not an artefact of the 193 post-COVID predominantly arterial count sites, @tbl-multiset compares key configurations on the **348-site extended Leeds LAD dataset (`2015–2025`, containing 135 minor-road sites)** and the **412-site external `aadtbench` `leeds-v1` benchmark**. On the 348-site minor-road-rich dataset, `N4_csis_strategic + ue_improved_cal` achieves **$r = `{python} f"{r_n4_ext['pearson_r']:.3f}"`$, $\rho = `{python} f"{r_n4_ext['spearman_rho']:.3f}"`$, $R^2 = `{python} f"{r_n4_ext['raw_r2']:.3f}"`$, $\text{MAE} = `{python} f"{r_n4_ext['mae']:,.0f}"`\text{ veh/day}$, and $\text{GEH} < 5 = `{python} f"{r_n4_ext['geh_lt_5_pct']:.1f}"`\%$** ($\text{GEH} < 10 = `{python} f"{r_n4_ext['geh_lt_10_pct']:.1f}"`\%$)—substantially outperforming `N3_csis_netclean` ($\text{MAE} = 7{,}279$, $\text{GEH} < 5 = 24.1\%$) because `N4`'s modal-filter barrier severance prevents rat-running across residential low-traffic filters.
+
+```{python}
+#| label: tbl-multiset
+#| tbl-cap: "Generalisation across the extended Leeds LAD 2015–2025 count dataset (rich minor-road sample, n = 348) and the full 15 km `aadtbench` `leeds-v1` benchmark (`sites.csv`, n = 412–417)."
+multi_specs = [
+    ("leeds_lad_2015_2025", "Leeds LAD 2015–25", "N0_raw_unfiltered", "aon_physical", "N0 + AON (phys)"),
+    ("leeds_lad_2015_2025", "Leeds LAD 2015–25", "N1_raw_motor", "ue_bfw_physical", "N1 + UE-BFW (phys)"),
+    ("leeds_lad_2015_2025", "Leeds LAD 2015–25", "N1_raw_motor", "ue_bfw_aadtbench", "N1 + UE-BFW (aadtbench)"),
+    ("leeds_lad_2015_2025", "Leeds LAD 2015–25", "N3_csis_netclean", "ue_improved_cal", "N3 + UE-Improved (cal)"),
+    ("leeds_lad_2015_2025", "Leeds LAD 2015–25", "N4_csis_strategic", "ue_improved_phys", "N4 + UE-Improved (phys k=1)"),
+    ("leeds_lad_2015_2025", "Leeds LAD 2015–25", "N4_csis_strategic", "ue_improved_cal", "N4 + UE-Improved (cal)"),
+    ("aadtbench_leeds_v1", "aadtbench leeds-v1", "N1_raw_motor", "ue_bfw_aadtbench", "N1 + UE-BFW (aadtbench)"),
+    ("aadtbench_leeds_v1", "aadtbench leeds-v1", "N4_csis_strategic", "ue_improved_phys", "N4 + UE-Improved (phys k=1)"),
+    ("aadtbench_leeds_v1", "aadtbench leeds-v1", "N4_csis_strategic", "ue_improved_cal", "N4 + UE-Improved (cal)"),
+]
+m_rows = []
+for eset, elbl, nid, aid, mlbl in multi_specs:
+    r = mrow(nid, aid, eset)
+    m_rows.append({
+        "Evaluation set": elbl,
+        "Model": mlbl,
+        "Matched n": int(r["n_sites_matched"]),
+        "r": f"{r['pearson_r']:.3f}",
+        "ρ": f"{r['spearman_rho']:.3f}",
+        "raw R²": f"{r['raw_r2']:.3f}",
+        "log R²": f"{r['log_r2']:.3f}",
+        "MAE": f"{r['mae']:,.0f}",
+        "GEH<5": f"{r['geh_lt_5_pct']:.1f}%",
+        "GEH<10": f"{r['geh_lt_10_pct']:.1f}%",
+    })
+Markdown(pd.DataFrame(m_rows).to_markdown(index=False))
+```
+
+### Central Motor Traffic Estimate Across Leeds LAD
+
+@fig-map maps the central daily motor traffic estimate (`data/processed/leeds_lad_aadt.parquet`) across all $36{,}232$ public-highway links in Leeds LAD alongside peak-hour volume-to-capacity ($V/C$) ratios in the urban core, while @fig-residuals and @tbl-hierarchy break down performance across road classes.
+
+![(a) Central estimate of link-level motor AADT across the Leeds Local Authority District (`N4_csis_strategic + ue_improved_cal`) overlaid with DfT 2021–2025 count sites on the identical colour scale; (b) peak-hour Passenger Car Equivalent (PCE) Volume-to-Capacity ($V/C$) ratio across central Leeds, M621, Armley Gyratory, and A58(M) Inner Ring Road.](figs/fig2_leeds_aadt_map.png){#fig-map width="100%"}
+
+```{python}
+#| label: tbl-hierarchy
+#| tbl-cap: "Central motor AADT estimate across Leeds LAD (`data/processed/leeds_lad_aadt.parquet`) stratified by road class: link count, clipped network length, length-weighted mean daily motor/light/heavy AADT, and daily motor-vehicle-kilometres (MVKM/day)."
+lad_df = pd.DataFrame(lad_aadt.drop(columns=["geometry"]))
+lad_df["len_km"] = lad_df["lad_length_m"] / 1000.0
+lad_df["mvkm"] = lad_df["aadt_motor"] * lad_df["lad_length_m"] / 1e9
+lad_df["car_vkm"] = lad_df["aadt_car"] * lad_df["lad_length_m"] / 1e9
+lad_df["hvy_vkm"] = lad_df["aadt_heavy"] * lad_df["lad_length_m"] / 1e9
+lad_df["phys_mvkm"] = lad_df["aadt_motor_phys"] * lad_df["lad_length_m"] / 1e9
+
+rc_order = ["motorway", "trunk", "primary", "secondary", "tertiary", "minor"]
+h_rows = []
+for rc in rc_order:
+    sub = lad_df[lad_df["road_class"] == rc]
+    l_sum = max(float(sub["len_km"].sum()), 1e-9)
+    h_rows.append({
+        "Road class": rc.capitalize(),
+        "Links": f"{len(sub):,}",
+        "Leeds km": f"{l_sum:,.1f}",
+        "Mean Motor AADT": f"{sub['mvkm'].sum() * 1e6 / l_sum:,.0f}",
+        "Mean Light AADT": f"{sub['car_vkm'].sum() * 1e6 / l_sum:,.0f}",
+        "Mean Heavy AADT": f"{sub['hvy_vkm'].sum() * 1e6 / l_sum:,.0f}",
+        "Heavy (%)": f"{sub['hvy_vkm'].sum() / max(sub['mvkm'].sum(), 1e-9) * 100:.1f}%",
+        "MVKM/day (Cal.)": f"{sub['mvkm'].sum():.2f}M",
+        "MVKM/day (Phys.)": f"{sub['phys_mvkm'].sum():.2f}M",
+    })
+tot_km = float(lad_df["len_km"].sum())
+tot_mvkm = float(lad_df["mvkm"].sum())
+h_rows.append({
+    "Road class": "**Total Leeds LAD**",
+    "Links": f"**{len(lad_df):,}**",
+    "Leeds km": f"**{tot_km:,.1f}**",
+    "Mean Motor AADT": f"**{tot_mvkm * 1e6 / tot_km:,.0f}**",
+    "Mean Light AADT": f"**{lad_df['car_vkm'].sum() * 1e6 / tot_km:,.0f}**",
+    "Mean Heavy AADT": f"**{lad_df['hvy_vkm'].sum() * 1e6 / tot_km:,.0f}**",
+    "Heavy (%)": f"**{lad_df['hvy_vkm'].sum() / tot_mvkm * 100:.1f}%**",
+    "MVKM/day (Cal.)": f"**{tot_mvkm:.2f}M**",
+    "MVKM/day (Phys.)": f"**{lad_df['phys_mvkm'].sum():.2f}M**",
+})
+Markdown(pd.DataFrame(h_rows).to_markdown(index=False))
+```
+
+Across the $2{,}973.5\text{ km}$ strategic public road network in Leeds LAD (@tbl-hierarchy), motorways (`M1`, `M62`, `M621`, `A58(M)`, `A64(M)` — $161.4\text{ km}$ of directional carriageways and slip links) carry **$5.34\text{ M}$ MVKM/day** ($30.8\%$ of all district traffic on $5.4\%$ of network length, with a realistic $12.8\%$ heavy-vehicle share), while primary and trunk A-roads (`A6120`, `A64`, `A61`, `A660`, `A65`, `A647`, `A63` — $382.1\text{ km}$) carry **$5.22\text{ M}$ MVKM/day** ($30.1\%$). Together, Major roads account for **$10.56\text{ M}$ MVKM/day** ($60.8\%$), and secondary, tertiary, and minor roads ($2{,}430.0\text{ km}$) carry **$6.80\text{ M}$ MVKM/day** ($39.2\%$), bringing total Leeds LAD motor traffic to **$17.35\text{ M}$ MVKM/day** ($6.33\text{ billion}$ veh-km/year). As shown in @fig-residuals (panel b), the SRN gateways and `netweld` lane capacities eliminate the severe motorway under-prediction (`TM`) and A-road over-prediction (`PA`, `TA`) present in the baseline `N1 + AON` and `N1 + UE-BFW` models.
+
+![(a) Spatial distribution of out-of-fold WebTAG GEH across Leeds LAD (`N4 + ue_improved_cal`); (b) mean observed vs modelled daily motor AADT across DfT road categories (`TM`, `PM`, `PA`, `TA`, `MB`, `MCU`).](figs/fig5_spatial_residuals_and_classes.png){#fig-residuals width="100%"}
+
+---
+
+## Discussion
+
+### Why Attribute-Preserving Consolidation Outperforms Naive Simplification
+
+A central lesson of our cleaning experiments is that **graph simplification and attribute conflation are inseparable for equilibrium traffic assignment**. Minimal topological cleaning (`N2_minimal_python`) succeeded in halving graph size and BFW runtime ($9.0\text{ s} \to 4.9\text{ s}$), yet produced zero accuracy gain ($r = 0.649 \to 0.648$) when paired with uniform road-class capacities. Conversely, running multi-class equilibrium on uncleaned or minimally welded networks (`N1`, `N2`) hit an accuracy ceiling ($r \approx 0.75$) because unconsolidated roundabouts, duplicated slip roads, and missing per-direction lane counts distorted BPR volume–capacity ratios at key bottlenecks such as Armley Gyratory, the M621 junctions, and the A58(M) Inner Ring Road. Combining 14-stage Rust `netclean` junction consolidation with `netweld` buffer-and-bearing transfer of OSM `lanes` and `maxspeed` (`N3`, `N4`) unlocked a $+0.10$ jump in pure physical assignment correlation ($r = 0.749 \to 0.850$) while executing in $5.3\text{ s}$.
+
+### Physical Conservation vs Post-Assignment Calibration
+
+Transport modellers face an inherent tension when working with open synthetic OD matrices (`T2_synthetic_od`). Pure physical equilibrium (`ue_improved_phys`, $k = 1$) strictly satisfies Kirchoff flow conservation at every junction—essential for testing junction closures, clean-air zones, or modal filters where reassigned detours must balance—and already achieves $r = 0.850$, $\rho = 0.874$, and $\text{MAE} = 10{,}323\text{ veh/day}$ without fitting a single parameter to count data. However, because `zones.parquet` aggregates origins and destinations to $\approx 1\text{ km}^2$ cells, short intrazonal car trips never enter the network, leaving minor streets (`MCU`) systematically under-loaded in raw assignment (`lad_aadt` stores both `aadt_motor_phys` and `aadt_motor` so downstream applications can choose between strict flow conservation and empirical link totals).
+
+Unlike `aadtbench`'s deterministic power-law modulation ($\gamma = 0.50$), our `csis`-style spatially blocked Ridge calibration (`ue_improved_cal`) learns class- and capacity-specific empirical adjustments from DfT counts while guarding against spatial autocorrelation leakage via $3\text{ km}$ block cross-validation [@roberts2017blockcv]. While `GEH < 5` rises from $6.7\%$ (uncritical baseline) and $17.0\%$ (`N1 + ue_bfw`) to $28.5\%$ (`2021–2025`) and $31.6\%$ (`2015–2025`), this remains below the $85\%$ WebTAG criterion expected of bespoke cordons calibrated via origin–destination matrix estimation (ODME / SATURN ME2) against observed roadside/mobile-network OD matrices [@dft2024tag]. High mean percentage error ($\text{MAPE} = 83.3\%$ vs $\text{MedAPE} = 25.8\%$) is driven by a handful of low-volume `MCU` cut-through streets ($500\text{--}1{,}500\text{ veh/day}$) where a $2{,}000\text{ veh/day}$ error translates to $> 150\%$ relative error.
+
+### What Worked and What Did Not
+
+Documenting negative experimental findings is essential for reproducible modelling:
+
+- **Worked — SRN-only perimeter gateways**: Restricting external gateways to the $10$ Strategic Road Network (`motorway`/`trunk`) portals at $r \ge 14.2\text{ km}$ corrected M1/M62/M621 boundary starvation (`TM` mean flow rose from $42.5\text{k}$ to $67.7\text{k}\text{ veh/day}$).
+- **Did NOT work — All-arterial perimeter gateways**: An earlier prototype placed $60$ gateways on all `primary` and `secondary` roads crossing the $15\text{ km}$ rim. Because the $15\text{ km}$ disc already encompasses local A-road commuter sheds between Leeds and neighbouring towns, adding external A-road gateways double-counted radial commuting and over-predicted `PA` A-roads by $\approx 1.6\times$.
+- **Did NOT work — Artificial road-hierarchy impedance multipliers**: Multiplying residential and collector free-flow times by $1.14\text{--}1.32\times$ plus nodal degree turn penalties on top of posted speed limits double-penalised minor roads, degrading Spearman $\rho$ from $0.874$ to $0.819$ and dropping $\text{GEH} < 5$ from $13.0\%$ to $7.3\%$ on physical UE. Reverting to pure physical travel times ($L / v_{\text{posted}}$) immediately restored rank order across the hierarchy.
+- **Worked — `osmactive` modal-filter barrier severance (`N4` vs `N3`)**: Splitting and severing graph nodes at $379$ `osmactive`-classified bollards and modal filters improved minor-road validation on the 348-site 2015–2025 dataset ($\text{MAE}$ fell by $15\%$ from $7{,}279 \to 6{,}163\text{ veh/day}$, $\text{GEH} < 5$ rose from $24.1\% \to 31.6\%$).
+- **Hazard identified — Dense sub-zone connector scaling & `cap_km` cliff**: Increasing sub-zone snapping from $2\times 2$ ($\approx 1{,}000$ centroids, $8.2\text{ s}$) to $3\times 3$ across all zones ($6{,}887$ centroids) increased multi-class BFW runtime $7.5\times$ ($61.6\text{ s}$) for negligible accuracy change, while `aadtbench`'s `0.09 * cap_km` threshold creates a knife-edge discontinuity whenever aggressive pruning reduces network capacity-km.
+
+---
+
+## Data, Software, and Licence Attributions
+
+- **OpenStreetMap data**: Network geometries, highway classifications, lane counts, speed limits, and barrier nodes are derived from OpenStreetMap (`© OpenStreetMap contributors`) and made available under the **Open Data Commons Open Database License (ODbL) v1.0**.
+- **DfT Road Traffic Statistics and ONS Geography**: Annual Average Daily Flow (AADF) count observations (`data/dft/`, ingested via `atf-lab/countsget`) and the Leeds Local Authority District boundary (`data/leeds-lad.geojson`, ONS code `E08000035`) contain public sector information licensed under the **Open Government Licence (OGL) v3.0**.
+- **Open-source software**: Equilibrium assignment used **AequilibraE** `1.7.2` [@camargo2024aequilibrae]; network extraction, GB access rules, topological cleaning, and attribute conflation used **`osmget`** (`2374fcf`), **`osmactive`** (`0173318`), **`netfit`/`netclean`** (`537fec2`), and **`netweld`** (`c0a7a12`) [@lovelace2026csis], benchmarked against **`aadtbench`** (`56d886d`) [@lovelace2026aadtbench].
+
+---
+
+## Appendix: End-to-End Reproduction Commands {.appendix}
+
+All tables and inline metrics in this paper execute directly against the compact committed caches in `data/processed/` (`2.2 MB` total). To regenerate all caches and figures from raw `leeds-v1` and `data/dft/` inputs, run the four build scripts from the repository root:
+
+```{bash}
+#| label: appendix-reproduce
+#| eval: false
+#| echo: true
+python3.12 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt jupyter tabulate
+
+# 1. Aggregate DfT motor/light/heavy AADF, VKM reference, and 5-fold 3 km spatial blocks
+python scripts/01_prepare_counts.py
+
+# 2. Build N0..N4 network variants (Python minimal clean + Rust osmget/osmactive/netfit/netweld)
+python scripts/02_clean_networks.py
+
+# 3. Run AequilibraE assignment matrix (AON, UE-BFW, multi-class SRN UE, spatial OOF calibration)
+python scripts/03_run_assignments.py
+
+# 4. Render 300-dpi camera-ready figures to paper/figs/
+python scripts/04_make_figures.py
+
+# 5. Render Quarto website & paper (< 30 seconds from committed caches)
+QUARTO_PYTHON=.venv/bin/python quarto render
+```
+
+## References {.unnumbered}

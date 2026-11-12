@@ -10,3 +10,7 @@ __pycache__/
 *.gpkg-wal
 *.gpkg-shm
 data/processed/_work/
+
+/.quarto/
+_freeze/
+**/*.quarto_ipynb
